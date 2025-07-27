@@ -50,10 +50,28 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static('.'));
 
+// Health check endpoint для Railway
+app.get('/health', (req, res) => {
+    res.json({ 
+        status: 'OK', 
+        timestamp: new Date().toISOString(),
+        uptime: process.uptime()
+    });
+});
+
+// Root endpoint
+app.get('/', (req, res) => {
+    res.sendFile(path.join(__dirname, 'index.html'));
+});
+
 // Функция сохранения данных в историю
 function saveToHistory(buyData, sellData, minAmount, selectedBank) {
     try {
+        // Используем украинское время (UTC+2/UTC+3)
         const now = new Date();
+        const ukraineTime = new Date(now.getTime() + (2 * 60 * 60 * 1000)); // UTC+2 (зимнее время)
+        // Для летнего времени UTC+3: const ukraineTime = new Date(now.getTime() + (3 * 60 * 60 * 1000));
+        
         const buyAds = buyData.result?.items || [];
         const sellAds = sellData.result?.items || [];
 
@@ -84,12 +102,24 @@ function saveToHistory(buyData, sellData, minAmount, selectedBank) {
             const spread = sellPrice - buyPrice;
             const spreadPercent = buyPrice > 0 ? ((spread / buyPrice) * 100) : 0;
 
+            // Создаем уникальный ID записи для избежания дублей
+            const recordId = `${ukraineTime.getTime()}_${buyPrice}_${sellPrice}`;
+            
+            // Проверяем нет ли уже такой записи
+            const existingRecord = priceHistory.find(record => record.id === recordId);
+            if (existingRecord) {
+                console.log(`⚠️ Запись ${recordId} уже существует, пропускаем`);
+                return;
+            }
+
             const record = {
-                timestamp: now.toISOString(),
-                date: now.toDateString(),
-                time: now.toTimeString().split(' ')[0],
-                hour: now.getHours(),
-                dayOfWeek: now.toLocaleDateString('ru', { weekday: 'long' }),
+                id: recordId, // Уникальный идентификатор
+                timestamp: ukraineTime.toISOString(),
+                date: ukraineTime.toLocaleDateString('uk-UA'),
+                time: ukraineTime.toLocaleTimeString('uk-UA', { hour12: false }),
+                hour: ukraineTime.getHours(),
+                minute: ukraineTime.getMinutes(),
+                dayOfWeek: ukraineTime.toLocaleDateString('uk-UA', { weekday: 'long' }),
                 buyPrice: buyPrice,
                 sellPrice: sellPrice,
                 spread: spread,
@@ -97,7 +127,8 @@ function saveToHistory(buyData, sellData, minAmount, selectedBank) {
                 buyerName: buyerName,
                 sellerName: sellerName,
                 minAmount: minAmount,
-                selectedBank: selectedBank || 'все'
+                selectedBank: selectedBank || 'все',
+                createdAt: ukraineTime.toISOString() // Время создания записи
             };
 
             priceHistory.push(record);
@@ -107,12 +138,12 @@ function saveToHistory(buyData, sellData, minAmount, selectedBank) {
                 priceHistory.shift();
             }
 
-            // Автосохранение каждые 10 записей
-            if (priceHistory.length % 10 === 0) {
+            // Автосохранение каждые 5 записей (чаще для надежности)
+            if (priceHistory.length % 5 === 0) {
                 saveHistoryToFile();
             }
 
-            console.log(`💾 Данные сохранены: ${record.time} | Покупка: ${buyPrice.toFixed(2)} ₴ | Продажа: ${sellPrice.toFixed(2)} ₴`);
+            console.log(`💾 Данные сохранены: ${record.date} ${record.time} | Покупка: ${buyPrice.toFixed(2)} ₴ | Продажа: ${sellPrice.toFixed(2)} ₴`);
         }
     } catch (error) {
         console.error('❌ Ошибка сохранения данных:', error);

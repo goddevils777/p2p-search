@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>P2P Price Monitor</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>P2P Аналитик цен</h1>
+            <p>Мониторинг и анализ цен P2P торговли</p>
+        </header>
+
+        <div class="controls">
+            <div class="filter-group">
+                <div class="amount-filter">
+                    <label for="minAmount">Мин. сумма:</label>
+                    <input type="number" id="minAmount" value="5000" min="100" step="100" placeholder="5000">
+                    <span>₴</span>
+                </div>
+                <div class="bank-filter">
+                    <label for="bankSelect">Банк:</label>
+                    <select id="bankSelect">
+                        <option value="">Все банки</option>
+                        <option value="mono">Monobank</option>
+                        <option value="privat">ПриватБанк</option>
+                        <option value="oschadbank">Ощадбанк</option>
+                    </select>
+                </div>
+            </div>
+            <div class="action-buttons">
+                <button id="startBtn" class="btn-primary">Запустить мониторинг</button>
+                <button id="stopBtn" class="btn-secondary" disabled>Остановить</button>
+            </div>
+            <div class="status">
+                <span id="status">Готов к запуску</span>
+            </div>
+        </div>
+
+        <div class="current-price">
+            <h2>Текущие цены USDT/UAH</h2>
+            <div class="price-cards">
+                <div class="price-card buy">
+                    <h3>Покупка</h3>
+                    <div class="price" id="buyPrice">--</div>
+                    <div class="time" id="buyTime">--</div>
+                </div>
+                <div class="price-card sell">
+                    <h3>Продажа</h3>
+                    <div class="price" id="sellPrice">--</div>
+                    <div class="time" id="sellTime">--</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="data-log">
+            <h2>Лог данных</h2>
+            <div id="dataLog" class="log-container"></div>
+        </div>
+
+        <div class="analytics-section">
+            <h2>Аналитика закономерностей</h2>
+            <div class="analytics-controls">
+                <button id="loadAnalytics" class="btn-analytics">Обновить аналитику</button>
+                <div class="analytics-info">
+                    <span id="analyticsInfo">Данных пока нет</span>
+                </div>
+            </div>
+            <div id="analyticsChart" class="analytics-chart"></div>
+            <div id="recommendations" class="recommendations"></div>
+        </div>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>

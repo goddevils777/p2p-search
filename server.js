@@ -1,559 +1,513 @@
-class P2PMonitor {
-    constructor() {
-        this.isRunning = false;
-        this.interval = null;
-        this.initElements();
-        this.bindEvents();
-        this.checkServerStatus(); // Проверяем статус сервера при загрузке
-    }
+const express = require('express');
+const cors = require('cors');
+const fetch = require('node-fetch');
+const path = require('path');
+const fs = require('fs');
 
-    initElements() {
-        this.startBtn = document.getElementById('startBtn');
-        this.stopBtn = document.getElementById('stopBtn');
-        this.status = document.getElementById('status');
-        this.buyPrice = document.getElementById('buyPrice');
-        this.sellPrice = document.getElementById('sellPrice');
-        this.buyTime = document.getElementById('buyTime');
-        this.sellTime = document.getElementById('sellTime');
-        this.dataLog = document.getElementById('dataLog');
-        this.minAmountInput = document.getElementById('minAmount');
-        this.bankSelect = document.getElementById('bankSelect');
-        this.loadAnalyticsBtn = document.getElementById('loadAnalytics');
-        this.analyticsInfo = document.getElementById('analyticsInfo');
-        this.analyticsChart = document.getElementById('analyticsChart');
-        this.recommendations = document.getElementById('recommendations');
-    }
+const app = express();
+const PORT = process.env.PORT || 3000;
 
-    bindEvents() {
-        this.startBtn.addEventListener('click', () => this.start());
-        this.stopBtn.addEventListener('click', () => this.stop());
-        this.loadAnalyticsBtn.addEventListener('click', () => this.loadAnalytics());
-    }
+// Файл для сохранения данных
+const DATA_FILE = path.join(__dirname, 'price_history.json');
 
-    async fetchP2PData() {
-        try {
-            const minAmount = parseInt(this.minAmountInput.value) || 5000;
-            const selectedBank = this.bankSelect.value;
-            
-            // Запрос к нашему серверу с параметрами
-            const response = await fetch('http://localhost:3000/api/p2p-data', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({
-                    minAmount: minAmount,
-                    bank: selectedBank
-                })
-            });
+// Хранилище данных в памяти
+let priceHistory = [];
+let isMonitoringActive = false;
+let monitoringInterval = null;
+let currentMonitoringSettings = {
+    minAmount: 5000,
+    bank: ''
+};
 
-            if (!response.ok) {
-                throw new Error(`HTTP error! status: ${response.status}`);
-            }
-
-            const result = await response.json();
-            
-            if (!result.success) {
-                throw new Error(result.error || 'Ошибка получения данных');
-            }
-
-            const bankText = selectedBank ? this.getBankName(selectedBank) : 'все банки';
-            this.addLog(`Данные получены от Bybit P2P (мин. ${minAmount} ₴, ${bankText})`, 'info');
-            return {
-                buyData: result.buyData,
-                sellData: result.sellData
-            };
-            
-        } catch (error) {
-            console.error('Error fetching P2P data:', error);
-            this.addLog(`Ошибка API: ${error.message}`, 'error');
-            return null;
+// Функции для работы с файлами
+function loadHistoryFromFile() {
+    try {
+        if (fs.existsSync(DATA_FILE)) {
+            const data = fs.readFileSync(DATA_FILE, 'utf8');
+            priceHistory = JSON.parse(data);
+            console.log(`📁 Загружено ${priceHistory.length} записей из файла`);
         }
+    } catch (error) {
+        console.error('❌ Ошибка загрузки данных:', error);
+        priceHistory = [];
     }
+}
 
-    getBankName(bankCode) {
-        const bankNames = {
-            'mono': 'Monobank',
-            'privat': 'ПриватБанк',
-            'oschadbank': 'Ощадбанк'
-        };
-        return bankNames[bankCode] || bankCode;
+function saveHistoryToFile() {
+    try {
+        fs.writeFileSync(DATA_FILE, JSON.stringify(priceHistory, null, 2));
+        console.log(`💾 Сохранено ${priceHistory.length} записей в файл`);
+    } catch (error) {
+        console.error('❌ Ошибка сохранения данных:', error);
     }
+}
 
-    updatePrices(data) {
-        console.log('Received data:', data); // Для отладки
-        
-        if (!data) {
-            this.addLog('Нет данных от API', 'warning');
-            return;
-        }
+// Загружаем данные при старте
+loadHistoryFromFile();
 
-        // Проверяем структуру данных Bybit
-        if (!data.buyData || !data.sellData) {
-            this.addLog('Неверная структура данных', 'warning');
-            return;
-        }
+// Middleware
+app.use(cors());
+app.use(express.json());
+app.use(express.static('.'));
 
-        // Для Bybit данные в result.items
-        const buyAds = data.buyData.result?.items || [];
-        const sellAds = data.sellData.result?.items || [];
-        const currentTime = new Date().toLocaleTimeString();
+// Функция сохранения данных в историю
+function saveToHistory(buyData, sellData, minAmount, selectedBank) {
+    try {
+        const now = new Date();
+        const buyAds = buyData.result?.items || [];
+        const sellAds = sellData.result?.items || [];
 
-        if (buyAds.length === 0 && sellAds.length === 0) {
-            this.addLog('Нет объявлений', 'warning');
-            return;
-        }
-
-        // Пробуем получить цены из Bybit структуры (берем 3-е объявление)
-        let bestBuyPrice = 0;
-        let bestSellPrice = 0;
+        let buyPrice = 0;
+        let sellPrice = 0;
         let buyerName = '';
         let sellerName = '';
 
         // Берем 3-е объявление (индекс 2), если есть, иначе первое
         if (buyAds.length > 2 && buyAds[2].price) {
-            bestBuyPrice = parseFloat(buyAds[2].price);
+            buyPrice = parseFloat(buyAds[2].price);
             buyerName = buyAds[2].nickName || 'Неизвестно';
         } else if (buyAds.length > 0 && buyAds[0].price) {
-            bestBuyPrice = parseFloat(buyAds[0].price);
+            buyPrice = parseFloat(buyAds[0].price);
             buyerName = buyAds[0].nickName || 'Неизвестно';
         }
 
         if (sellAds.length > 2 && sellAds[2].price) {
-            bestSellPrice = parseFloat(sellAds[2].price);
+            sellPrice = parseFloat(sellAds[2].price);
             sellerName = sellAds[2].nickName || 'Неизвестно';
         } else if (sellAds.length > 0 && sellAds[0].price) {
-            bestSellPrice = parseFloat(sellAds[0].price);
+            sellPrice = parseFloat(sellAds[0].price);
             sellerName = sellAds[0].nickName || 'Неизвестно';
         }
 
-        if (bestBuyPrice > 0) {
-            this.buyPrice.textContent = `${bestBuyPrice.toFixed(2)} ₴`;
-            this.buyTime.textContent = currentTime;
-        }
+        // Сохраняем только если есть цены
+        if (buyPrice > 0 || sellPrice > 0) {
+            const spread = sellPrice - buyPrice;
+            const spreadPercent = buyPrice > 0 ? ((spread / buyPrice) * 100) : 0;
 
-        if (bestSellPrice > 0) {
-            this.sellPrice.textContent = `${bestSellPrice.toFixed(2)} ₴`;
-            this.sellTime.textContent = currentTime;
-        }
+            const record = {
+                timestamp: now.toISOString(),
+                date: now.toDateString(),
+                time: now.toTimeString().split(' ')[0],
+                hour: now.getHours(),
+                dayOfWeek: now.toLocaleDateString('ru', { weekday: 'long' }),
+                buyPrice: buyPrice,
+                sellPrice: sellPrice,
+                spread: spread,
+                spreadPercent: spreadPercent,
+                buyerName: buyerName,
+                sellerName: sellerName,
+                minAmount: minAmount,
+                selectedBank: selectedBank || 'все'
+            };
 
-        // Добавляем в лог с указанием позиции и имен
-        if (bestBuyPrice > 0 && bestSellPrice > 0) {
-            const spread = ((bestSellPrice - bestBuyPrice) / bestBuyPrice * 100).toFixed(2);
-            const buyPos = buyAds.length > 2 ? '3-е' : '1-е';
-            const sellPos = sellAds.length > 2 ? '3-е' : '1-е';
-            this.addLog(`Покупка: ${bestBuyPrice.toFixed(2)} ₴ (${buyPos}, ${buyerName}) | Продажа: ${bestSellPrice.toFixed(2)} ₴ (${sellPos}, ${sellerName}) | Спред: ${spread}%`);
-        } else if (bestBuyPrice > 0) {
-            const buyPos = buyAds.length > 2 ? '3-е' : '1-е';
-            this.addLog(`Покупка: ${bestBuyPrice.toFixed(2)} ₴ (${buyPos}, ${buyerName})`);
-        } else if (bestSellPrice > 0) {
-            const sellPos = sellAds.length > 2 ? '3-е' : '1-е';
-            this.addLog(`Продажа: ${bestSellPrice.toFixed(2)} ₴ (${sellPos}, ${sellerName})`);
-        } else {
-            this.addLog('Не удалось получить цены', 'warning');
-        }
-    }
+            priceHistory.push(record);
 
-    addLog(message, type = 'info') {
-        const timestamp = new Date().toLocaleTimeString();
-        const logEntry = document.createElement('div');
-        logEntry.className = `log-entry ${type}`;
-        
-        logEntry.innerHTML = `
-            <span class="timestamp">[${timestamp}]</span>
-            <span class="price-data">${message}</span>
-        `;
-
-        this.dataLog.insertBefore(logEntry, this.dataLog.firstChild);
-
-        // Ограничиваем количество записей в логе
-        if (this.dataLog.children.length > 100) {
-            this.dataLog.removeChild(this.dataLog.lastChild);
-        }
-    }
-
-    async start() {
-        if (this.isRunning) return;
-
-        try {
-            const minAmount = parseInt(this.minAmountInput.value) || 5000;
-            const selectedBank = this.bankSelect.value;
-
-            // Запускаем серверный мониторинг
-            const response = await fetch('/api/monitoring/start', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({
-                    minAmount: minAmount,
-                    bank: selectedBank
-                })
-            });
-
-            const result = await response.json();
-            
-            if (result.success) {
-                this.isRunning = true;
-                this.startBtn.disabled = true;
-                this.stopBtn.disabled = false;
-                this.status.textContent = 'Серверный мониторинг активен';
-                this.addLog('Серверный мониторинг 24/7 запущен');
-                
-                // Запускаем клиентское обновление данных
-                this.startClientUpdates();
-            } else {
-                this.addLog(`Ошибка запуска: ${result.message}`, 'error');
+            // Ограничиваем историю до 5000 записей (примерно неделя данных)
+            if (priceHistory.length > 5000) {
+                priceHistory.shift();
             }
 
-        } catch (error) {
-            console.error('Error starting monitoring:', error);
-            this.addLog(`Ошибка запуска: ${error.message}`, 'error');
-        }
-    }
-
-    async stop() {
-        if (!this.isRunning) return;
-
-        try {
-            // Останавливаем серверный мониторинг
-            const response = await fetch('/api/monitoring/stop', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                }
-            });
-
-            const result = await response.json();
-            
-            if (result.success) {
-                this.isRunning = false;
-                this.startBtn.disabled = false;
-                this.stopBtn.disabled = true;
-                this.status.textContent = 'Мониторинг остановлен';
-                this.addLog('Серверный мониторинг остановлен');
-                
-                // Останавливаем клиентское обновление
-                this.stopClientUpdates();
+            // Автосохранение каждые 10 записей
+            if (priceHistory.length % 10 === 0) {
+                saveHistoryToFile();
             }
 
-        } catch (error) {
-            console.error('Error stopping monitoring:', error);
-            this.addLog(`Ошибка остановки: ${error.message}`, 'error');
+            console.log(`💾 Данные сохранены: ${record.time} | Покупка: ${buyPrice.toFixed(2)} ₴ | Продажа: ${sellPrice.toFixed(2)} ₴`);
         }
-    }
-
-    async checkServerStatus() {
-        try {
-            const response = await fetch('/api/monitoring/status');
-            const data = await response.json();
-            
-            if (data.success && data.isActive) {
-                // Сервер уже мониторит
-                this.isRunning = true;
-                this.startBtn.disabled = true;
-                this.stopBtn.disabled = false;
-                this.status.textContent = 'Серверный мониторинг активен';
-                this.addLog(`Мониторинг уже запущен (собрано ${data.recordsCount} записей)`);
-                
-                // Запускаем клиентское обновление
-                this.startClientUpdates();
-            } else {
-                this.status.textContent = 'Готов к запуску';
-            }
-            
-        } catch (error) {
-            console.error('Error checking server status:', error);
-            this.status.textContent = 'Ошибка подключения к серверу';
-        }
-    }
-
-    startClientUpdates() {
-        // Запускаем периодическое обновление интерфейса каждые 30 секунд
-        this.interval = setInterval(() => {
-            this.updateInterfaceFromServer();
-        }, 30000);
-        
-        // Первое обновление сразу
-        this.updateInterfaceFromServer();
-    }
-
-    stopClientUpdates() {
-        if (this.interval) {
-            clearInterval(this.interval);
-            this.interval = null;
-        }
-    }
-
-    async updateInterfaceFromServer() {
-        try {
-            // Получаем последние данные от сервера
-            const response = await fetch('/api/analytics');
-            const data = await response.json();
-            
-            if (data.success && data.latestData && data.latestData.length > 0) {
-                const latest = data.latestData[0]; // Самая последняя запись
-                
-                // Обновляем интерфейс
-                this.buyPrice.textContent = `${latest.buyPrice.toFixed(2)} ₴`;
-                this.sellPrice.textContent = `${latest.sellPrice.toFixed(2)} ₴`;
-                this.buyTime.textContent = latest.time;
-                this.sellTime.textContent = latest.time;
-                
-                // Добавляем в лог
-                this.addLog(`Покупка: ${latest.buyPrice.toFixed(2)} ₴ (${latest.buyerName}) | Продажа: ${latest.sellPrice.toFixed(2)} ₴ (${latest.sellerName}) | Спред: ${latest.spreadPercent.toFixed(2)}%`);
-            }
-            
-        } catch (error) {
-            console.error('Error updating from server:', error);
-        }
-    }
-
-    async loadAnalytics() {
-        try {
-            this.analyticsInfo.textContent = 'Загрузка аналитики...';
-            
-            const response = await fetch('/api/analytics');
-            const data = await response.json();
-            
-            if (!data.success) {
-                throw new Error(data.error || 'Ошибка загрузки аналитики');
-            }
-
-            this.displayAnalytics(data);
-            
-        } catch (error) {
-            console.error('Error loading analytics:', error);
-            this.analyticsInfo.textContent = `Ошибка: ${error.message}`;
-        }
-    }
-
-    displayAnalytics(data) {
-        this.analyticsInfo.textContent = `Собрано ${data.totalRecords} записей данных`;
-        
-        if (data.totalRecords === 0) {
-            this.analyticsChart.innerHTML = '<p>Нет данных для отображения. Запустите мониторинг для сбора данных.</p>';
-            this.recommendations.innerHTML = '';
-            return;
-        }
-
-        // Отображаем график по часам
-        this.renderHourlyChart(data.hourlyAnalytics);
-        
-        // Генерируем рекомендации
-        this.generateRecommendations(data.hourlyAnalytics);
-    }
-
-    renderHourlyChart(hourlyData) {
-        let chartHTML = '<h3>Средние цены по часам</h3>';
-        
-        hourlyData.forEach(hour => {
-            const buyPrice = hour.avgBuyPrice.toFixed(2);
-            const sellPrice = hour.avgSellPrice.toFixed(2);
-            const spread = hour.avgSpread.toFixed(2);
-            const count = hour.count;
-            
-            chartHTML += `
-                <div class="hour-bar">
-                    <div class="hour-label">${hour.hour}:00</div>
-                    <div class="price-bar"></div>
-                    <div class="price-info">
-                        Покупка: ${buyPrice}₴ | Продажа: ${sellPrice}₴ | Спред: ${spread}% | Записей: ${count}
-                    </div>
-                </div>
-            `;
-        });
-        
-        this.analyticsChart.innerHTML = chartHTML;
-    }
-
-    generateRecommendations(hourlyData) {
-        if (hourlyData.length < 3) {
-            this.recommendations.innerHTML = '<h3>Рекомендации</h3><p>Недостаточно данных для анализа. Собирайте данные дольше.</p>';
-            return;
-        }
-
-        // Анализируем закономерности
-        const analysis = this.analyzePatterns(hourlyData);
-        
-        let recommendationsHTML = `
-            <h3>🎯 Анализ закономерностей торговли</h3>
-            
-            <div class="analysis-section">
-                <h4>📊 Статистика по времени:</h4>
-                <div class="recommendation-item">
-                    <strong>💰 Самые дешевые часы для покупки:</strong> 
-                    ${analysis.cheapestHours.map(h => `${h.hour}:00 (${h.avgBuyPrice.toFixed(2)}₴)`).join(', ')}
-                </div>
-                
-                <div class="recommendation-item">
-                    <strong>💸 Самые дорогие часы для продажи:</strong> 
-                    ${analysis.expensiveHours.map(h => `${h.hour}:00 (${h.avgSellPrice.toFixed(2)}₴)`).join(', ')}
-                </div>
-                
-                <div class="recommendation-item">
-                    <strong>📈 Часы с максимальным спредом:</strong> 
-                    ${analysis.highSpreadHours.map(h => `${h.hour}:00 (${h.avgSpread.toFixed(2)}%)`).join(', ')}
-                </div>
-            </div>
-
-            <div class="analysis-section">
-                <h4>🔍 Проверка логики "утром дешево - вечером дорого":</h4>
-                ${this.generateTimeLogicAnalysis(hourlyData)}
-            </div>
-
-            <div class="analysis-section">
-                <h4>💡 Топ прибыльных стратегий:</h4>
-                ${this.generateProfitableStrategies(hourlyData)}
-            </div>
-
-            <div class="analysis-section">
-                <h4>⚠️ Выводы и рекомендации:</h4>
-                ${this.generateConclusions(analysis, hourlyData)}
-            </div>
-        `;
-
-        this.recommendations.innerHTML = recommendationsHTML;
-    }
-
-    analyzePatterns(hourlyData) {
-        // Находим топ-3 самых дешевых часов для покупки
-        const cheapestHours = [...hourlyData]
-            .filter(h => h.count >= 2)
-            .sort((a, b) => a.avgBuyPrice - b.avgBuyPrice)
-            .slice(0, 3);
-
-        // Находим топ-3 самых дорогих часов для продажи  
-        const expensiveHours = [...hourlyData]
-            .filter(h => h.count >= 2)
-            .sort((a, b) => b.avgSellPrice - a.avgSellPrice)
-            .slice(0, 3);
-
-        // Находим часы с максимальным спредом
-        const highSpreadHours = [...hourlyData]
-            .filter(h => h.count >= 2)
-            .sort((a, b) => b.avgSpread - a.avgSpread)
-            .slice(0, 3);
-
-        return { cheapestHours, expensiveHours, highSpreadHours };
-    }
-
-    generateTimeLogicAnalysis(hourlyData) {
-        const morningHours = hourlyData.filter(h => h.hour >= 6 && h.hour <= 11 && h.count >= 2);
-        const afternoonHours = hourlyData.filter(h => h.hour >= 12 && h.hour <= 17 && h.count >= 2);
-        const eveningHours = hourlyData.filter(h => h.hour >= 18 && h.hour <= 23 && h.count >= 2);
-        const nightHours = hourlyData.filter(h => (h.hour >= 0 && h.hour <= 5) && h.count >= 2);
-
-        if (morningHours.length === 0 || eveningHours.length === 0) {
-            return '<p>Недостаточно данных для анализа по времени суток.</p>';
-        }
-
-        const avgMorningBuy = morningHours.reduce((sum, h) => sum + h.avgBuyPrice, 0) / morningHours.length;
-        const avgEveningBuy = eveningHours.reduce((sum, h) => sum + h.avgBuyPrice, 0) / eveningHours.length;
-        const avgMorningSell = morningHours.reduce((sum, h) => sum + h.avgSellPrice, 0) / morningHours.length;
-        const avgEveningSell = eveningHours.reduce((sum, h) => sum + h.avgSellPrice, 0) / eveningHours.length;
-
-        const morningCheaper = avgMorningBuy < avgEveningBuy;
-        const eveningMoreExpensive = avgEveningSell > avgMorningSell;
-        
-        const buyDifference = Math.abs(avgMorningBuy - avgEveningBuy);
-        const sellDifference = Math.abs(avgEveningSell - avgMorningSell);
-
-        let analysis = `
-            <div class="logic-analysis">
-                <p><strong>Утром (6:00-11:00):</strong> Средняя покупка ${avgMorningBuy.toFixed(2)}₴, продажа ${avgMorningSell.toFixed(2)}₴</p>
-                <p><strong>Вечером (18:00-23:00):</strong> Средняя покупка ${avgEveningBuy.toFixed(2)}₴, продажа ${avgEveningSell.toFixed(2)}₴</p>
-                
-                <div class="logic-result ${morningCheaper ? 'positive' : 'negative'}">
-                    ${morningCheaper ? '✅' : '❌'} Утром покупать ${morningCheaper ? 'ВЫГОДНЕЕ' : 'ДОРОЖЕ'} на ${buyDifference.toFixed(2)}₴
-                </div>
-                
-                <div class="logic-result ${eveningMoreExpensive ? 'positive' : 'negative'}">
-                    ${eveningMoreExpensive ? '✅' : '❌'} Вечером продавать ${eveningMoreExpensive ? 'ВЫГОДНЕЕ' : 'ДЕШЕВЛЕ'} на ${sellDifference.toFixed(2)}₴
-                </div>
-            </div>
-        `;
-
-        return analysis;
-    }
-
-    generateProfitableStrategies(hourlyData) {
-        const strategies = [];
-        
-        // Проверяем все возможные комбинации часов
-        for (let buyHour of hourlyData) {
-            if (buyHour.count < 2) continue;
-            
-            for (let sellHour of hourlyData) {
-                if (sellHour.count < 2 || sellHour.hour === buyHour.hour) continue;
-                
-                const profit = sellHour.avgSellPrice - buyHour.avgBuyPrice;
-                const profitPercent = (profit / buyHour.avgBuyPrice) * 100;
-                
-                if (profit > 0) {
-                    strategies.push({
-                        buyHour: buyHour.hour,
-                        sellHour: sellHour.hour,
-                        profit: profit,
-                        profitPercent: profitPercent,
-                        buyPrice: buyHour.avgBuyPrice,
-                        sellPrice: sellHour.avgSellPrice
-                    });
-                }
-            }
-        }
-
-        // Сортируем по прибыльности
-        strategies.sort((a, b) => b.profitPercent - a.profitPercent);
-        
-        if (strategies.length === 0) {
-            return '<p>Прибыльных стратегий не найдено.</p>';
-        }
-
-        let strategiesHTML = '<div class="strategies-list">';
-        
-        strategies.slice(0, 5).forEach((strategy, index) => {
-            strategiesHTML += `
-                <div class="strategy-item ${index === 0 ? 'best-strategy' : ''}">
-                    <strong>${index + 1}. Покупка в ${strategy.buyHour}:00 → Продажа в ${strategy.sellHour}:00</strong>
-                    <br>Прибыль: ${strategy.profit.toFixed(2)}₴ (${strategy.profitPercent.toFixed(2)}%)
-                    <br>Цены: ${strategy.buyPrice.toFixed(2)}₴ → ${strategy.sellPrice.toFixed(2)}₴
-                </div>
-            `;
-        });
-        
-        strategiesHTML += '</div>';
-        return strategiesHTML;
-    }
-
-    generateConclusions(analysis, hourlyData) {
-        let conclusions = '';
-        
-        if (hourlyData.length < 12) {
-            conclusions += '<p class="warning">⚠️ Мало данных для надежных выводов. Собирайте данные минимум сутки.</p>';
-        }
-
-        const totalRecords = hourlyData.reduce((sum, h) => sum + h.count, 0);
-        
-        if (totalRecords < 50) {
-            conclusions += '<p class="warning">⚠️ Недостаточно записей для статистической значимости.</p>';
-        }
-
-        // Проверяем стабильность цен
-        const allBuyPrices = hourlyData.map(h => h.avgBuyPrice);
-        const buyPriceRange = Math.max(...allBuyPrices) - Math.min(...allBuyPrices);
-        
-        if (buyPriceRange < 0.5) {
-            conclusions += '<p class="info">📊 Цены стабильны, разброс менее 0.5₴ - арбитраж сложен.</p>';
-        } else {
-            conclusions += '<p class="success">💰 Есть разброс цен ${buyPriceRange.toFixed(2)}₴ - возможен арбитраж!</p>';
-        }
-
-        return conclusions || '<p class="success">✅ Система работает нормально, продолжайте сбор данных.</p>';
+    } catch (error) {
+        console.error('❌ Ошибка сохранения данных:', error);
     }
 }
 
-// Инициализация при загрузке страницы
-document.addEventListener('DOMContentLoaded', () => {
-    new P2PMonitor();
+// Функции серверного мониторинга
+function startServerMonitoring() {
+    if (isMonitoringActive) return;
+    
+    isMonitoringActive = true;
+    console.log('🚀 Запущен серверный мониторинг 24/7');
+    
+    // Первый запрос сразу
+    performMonitoringRequest();
+    
+    // Запускаем периодические запросы каждые 30 секунд
+    monitoringInterval = setInterval(() => {
+        performMonitoringRequest();
+    }, 30000);
+}
+
+function stopServerMonitoring() {
+    if (!isMonitoringActive) return;
+    
+    isMonitoringActive = false;
+    
+    if (monitoringInterval) {
+        clearInterval(monitoringInterval);
+        monitoringInterval = null;
+    }
+    
+    console.log('⏹️ Серверный мониторинг остановлен');
+}
+
+async function performMonitoringRequest() {
+    try {
+        console.log('🔄 Выполняется серверный мониторинг...');
+        
+        const { minAmount, bank } = currentMonitoringSettings;
+        const paymentFilter = [];
+        
+        // Запрос на покупку USDT
+        const buyResponse = await fetch('https://api2.bybit.com/fiat/otc/item/online', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            },
+            body: JSON.stringify({
+                userId: "",
+                tokenId: "USDT",
+                currencyId: "UAH",
+                payment: paymentFilter,
+                side: "1",
+                size: "20",
+                page: "1",
+                amount: minAmount.toString(),
+                authMaker: false,
+                canTrade: false
+            })
+        });
+
+        // Запрос на продажу USDT
+        const sellResponse = await fetch('https://api2.bybit.com/fiat/otc/item/online', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            },
+            body: JSON.stringify({
+                userId: "",
+                tokenId: "USDT",
+                currencyId: "UAH",
+                payment: paymentFilter,
+                side: "0",
+                size: "20",
+                page: "1",
+                amount: minAmount.toString(),
+                authMaker: false,
+                canTrade: false
+            })
+        });
+
+        if (buyResponse.ok && sellResponse.ok) {
+            const buyData = await buyResponse.json();
+            const sellData = await sellResponse.json();
+            
+            // Фильтруем новых пользователей
+            const filterNewUsers = (items) => {
+                return items.filter(item => {
+                    const isNewUserOffer = item.isNewUserOffer || item.newUserOffer || false;
+                    return !isNewUserOffer;
+                });
+            };
+
+            const filteredBuyData = {
+                ...buyData,
+                result: {
+                    ...buyData.result,
+                    items: filterNewUsers(buyData.result?.items || [])
+                }
+            };
+
+            const filteredSellData = {
+                ...sellData,
+                result: {
+                    ...sellData.result,
+                    items: filterNewUsers(sellData.result?.items || [])
+                }
+            };
+            
+            // Сохраняем данные
+            saveToHistory(filteredBuyData, filteredSellData, minAmount, bank);
+        }
+        
+    } catch (error) {
+        console.error('❌ Ошибка серверного мониторинга:', error);
+    }
+}
+
+// API для управления серверным мониторингом
+app.post('/api/monitoring/start', (req, res) => {
+    try {
+        const { minAmount = 5000, bank = '' } = req.body;
+        
+        if (isMonitoringActive) {
+            return res.json({
+                success: false,
+                message: 'Мониторинг уже запущен'
+            });
+        }
+
+        currentMonitoringSettings = { minAmount, bank };
+        startServerMonitoring();
+        
+        res.json({
+            success: true,
+            message: 'Серверный мониторинг запущен'
+        });
+        
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+app.post('/api/monitoring/stop', (req, res) => {
+    try {
+        stopServerMonitoring();
+        
+        res.json({
+            success: true,
+            message: 'Серверный мониторинг остановлен'
+        });
+        
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+app.get('/api/monitoring/status', (req, res) => {
+    res.json({
+        success: true,
+        isActive: isMonitoringActive,
+        settings: currentMonitoringSettings,
+        recordsCount: priceHistory.length
+    });
+});
+
+// API endpoint для получения P2P данных (для ручных запросов)
+app.post('/api/p2p-data', async (req, res) => {
+    try {
+        const { minAmount = 5000, bank = '' } = req.body;
+        console.log(`Запрос P2P данных Bybit с мин. суммой: ${minAmount} ₴, банк: ${bank || 'все'}`);
+        
+        const paymentFilter = [];
+        
+        // Запрос на покупку USDT
+        const buyResponse = await fetch('https://api2.bybit.com/fiat/otc/item/online', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            },
+            body: JSON.stringify({
+                userId: "",
+                tokenId: "USDT",
+                currencyId: "UAH",
+                payment: paymentFilter,
+                side: "1",
+                size: "20",
+                page: "1",
+                amount: minAmount.toString(),
+                authMaker: false,
+                canTrade: false
+            })
+        });
+
+        // Запрос на продажу USDT
+        const sellResponse = await fetch('https://api2.bybit.com/fiat/otc/item/online', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            },
+            body: JSON.stringify({
+                userId: "",
+                tokenId: "USDT",
+                currencyId: "UAH",
+                payment: paymentFilter,
+                side: "0",
+                size: "20",
+                page: "1",
+                amount: minAmount.toString(),
+                authMaker: false,
+                canTrade: false
+            })
+        });
+
+        if (!buyResponse.ok || !sellResponse.ok) {
+            throw new Error('Ошибка получения данных от Bybit');
+        }
+
+        const buyData = await buyResponse.json();
+        const sellData = await sellResponse.json();
+
+        console.log(`Сырых данных получено: покупка ${buyData.result?.items?.length || 0}, продажа ${sellData.result?.items?.length || 0}`);
+        
+        // Фильтруем новых пользователей
+        const filterNewUsers = (items) => {
+            return items.filter(item => {
+                const isNewUserOffer = item.isNewUserOffer || item.newUserOffer || false;
+                return !isNewUserOffer;
+            });
+        };
+
+        const filteredBuyData = {
+            ...buyData,
+            result: {
+                ...buyData.result,
+                items: filterNewUsers(buyData.result?.items || [])
+            }
+        };
+
+        const filteredSellData = {
+            ...sellData,
+            result: {
+                ...sellData.result,
+                items: filterNewUsers(sellData.result?.items || [])
+            }
+        };
+
+        console.log(`После фильтрации новых пользователей: покупка ${filteredBuyData.result.items.length}, продажа ${filteredSellData.result.items.length}`);
+        
+        // Сохраняем данные в историю
+        saveToHistory(filteredBuyData, filteredSellData, minAmount, bank);
+        
+        res.json({
+            success: true,
+            buyData: filteredBuyData,
+            sellData: filteredSellData,
+            minAmount,
+            bank: bank || 'все',
+            timestamp: new Date().toISOString()
+        });
+
+    } catch (error) {
+        console.error('Ошибка API:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+// API endpoint для получения аналитики
+app.get('/api/analytics', (req, res) => {
+    try {
+        if (priceHistory.length === 0) {
+            return res.json({
+                success: true,
+                message: 'Нет данных для анализа',
+                totalRecords: 0,
+                hourlyAnalytics: [],
+                latestData: []
+            });
+        }
+
+        // Аналитика по часам
+        const hourlyData = {};
+        
+        priceHistory.forEach(record => {
+            const hour = record.hour;
+            if (!hourlyData[hour]) {
+                hourlyData[hour] = {
+                    hour: hour,
+                    count: 0,
+                    avgBuyPrice: 0,
+                    avgSellPrice: 0,
+                    avgSpread: 0,
+                    minBuyPrice: record.buyPrice,
+                    maxSellPrice: record.sellPrice,
+                    records: []
+                };
+            }
+
+            const hd = hourlyData[hour];
+            hd.count++;
+            hd.avgBuyPrice = (hd.avgBuyPrice * (hd.count - 1) + record.buyPrice) / hd.count;
+            hd.avgSellPrice = (hd.avgSellPrice * (hd.count - 1) + record.sellPrice) / hd.count;
+            hd.avgSpread = (hd.avgSpread * (hd.count - 1) + record.spreadPercent) / hd.count;
+            hd.minBuyPrice = Math.min(hd.minBuyPrice, record.buyPrice);
+            hd.maxSellPrice = Math.max(hd.maxSellPrice, record.sellPrice);
+        });
+
+        // Превращаем в массив и сортируем по часам
+        const hourlyAnalytics = Object.values(hourlyData).sort((a, b) => a.hour - b.hour);
+
+        res.json({
+            success: true,
+            totalRecords: priceHistory.length,
+            hourlyAnalytics: hourlyAnalytics,
+            latestData: priceHistory.slice(-10).reverse() // Последние 10 записей
+        });
+
+    } catch (error) {
+        console.error('❌ Ошибка анализа данных:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+// API для экспорта/импорта данных
+app.get('/api/export-data', (req, res) => {
+    try {
+        // Принудительно сохраняем перед экспортом
+        saveHistoryToFile();
+        
+        res.json({
+            success: true,
+            data: priceHistory,
+            totalRecords: priceHistory.length,
+            exportDate: new Date().toISOString()
+        });
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+app.post('/api/import-data', (req, res) => {
+    try {
+        const { data } = req.body;
+        
+        if (!Array.isArray(data)) {
+            throw new Error('Данные должны быть массивом');
+        }
+        
+        priceHistory.length = 0; // Очищаем текущие данные
+        priceHistory.push(...data); // Добавляем импортированные
+        
+        saveHistoryToFile();
+        
+        res.json({
+            success: true,
+            message: `Импортировано ${data.length} записей`,
+            totalRecords: priceHistory.length
+        });
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+// Запуск сервера
+app.listen(PORT, () => {
+    console.log(`🚀 Сервер запущен: http://localhost:${PORT}`);
+    console.log('📊 P2P мониторинг готов к работе');
+    
+    // Сохраняем данные при завершении работы
+    process.on('SIGINT', () => {
+        console.log('\n⏹️ Завершение работы сервера...');
+        saveHistoryToFile();
+        process.exit(0);
+    });
 });

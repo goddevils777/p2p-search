@@ -36,7 +36,7 @@ class P2PMonitor {
             const selectedBank = this.bankSelect.value;
             
             // Запрос к нашему серверу с параметрами
-            const response = await fetch('http://localhost:3000/api/p2p-data', {
+            const response = await fetch('/api/p2p-data', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json'
@@ -180,7 +180,7 @@ class P2PMonitor {
             const selectedBank = this.bankSelect.value;
 
             // Запускаем серверный мониторинг
-            const response = await fetch('http://localhost:3000/api/monitoring/start', {
+            const response = await fetch('/api/monitoring/start', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json'
@@ -217,7 +217,7 @@ class P2PMonitor {
 
         try {
             // Останавливаем серверный мониторинг
-            const response = await fetch('http://localhost:3000/api/monitoring/stop', {
+            const response = await fetch('/api/monitoring/stop', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json'
@@ -245,7 +245,7 @@ class P2PMonitor {
 
     async checkServerStatus() {
         try {
-            const response = await fetch('http://localhost:3000/api/monitoring/status');
+            const response = await fetch('/api/monitoring/status');
             const data = await response.json();
             
             if (data.success && data.isActive) {
@@ -288,7 +288,7 @@ class P2PMonitor {
     async updateInterfaceFromServer() {
         try {
             // Получаем последние данные от сервера
-            const response = await fetch('http://localhost:3000/api/analytics');
+            const response = await fetch('/api/analytics');
             const data = await response.json();
             
             if (data.success && data.latestData && data.latestData.length > 0) {
@@ -313,7 +313,7 @@ class P2PMonitor {
         try {
             this.analyticsInfo.textContent = 'Загрузка аналитики...';
             
-            const response = await fetch('http://localhost:3000/api/analytics');
+            const response = await fetch('/api/analytics');
             const data = await response.json();
             
             if (!data.success) {
